@@ -26,8 +26,15 @@ import ProfileScreen from './ProfileScreen';
 import { useWebBackEntry } from '../hooks/useWebBackEntry';
 
 const POSTS_PAGE_SIZE = 10;
+const MIN_REFRESH_INTERVAL = 4000;
 
-export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }) {
+export default function FeedScreen({
+  guest,
+  onOpenComposer,
+  refreshTrigger = 0,
+  canManageRsvps = false,
+  onManageRsvps
+}) {
   const [posts, setPosts] = useState([]);
   const [storyGroups, setStoryGroups] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -65,7 +72,9 @@ export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }
     visible: false,
     post: null
   });
+  const showRsvpButton = canManageRsvps && typeof onManageRsvps === 'function';
   const loadLockRef = useRef(false);
+  const lastRefreshRef = useRef(0);
   const postsCursorRef = useRef(null);
   const [hasMorePosts, setHasMorePosts] = useState(true);
   const [loadingMorePosts, setLoadingMorePosts] = useState(false);
@@ -330,7 +339,13 @@ export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }
       .finally(() => setLoadingMorePosts(false));
   }, [loading, loadingMorePosts, refreshing, hasMorePosts, fetchPosts]);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (options = {}) => {
+    const force = options.force === true;
+    const now = Date.now();
+    if (!force && now - lastRefreshRef.current < MIN_REFRESH_INTERVAL) {
+      return;
+    }
+    lastRefreshRef.current = now;
     if (loadLockRef.current) return;
     loadLockRef.current = true;
     setRefreshing(true);
@@ -345,56 +360,109 @@ export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }
   }, [fetchPosts, fetchStories]);
 
   useEffect(() => {
-    loadData();
+    loadData({ force: true });
   }, [loadData]);
 
   useEffect(() => {
     if (!refreshTrigger) return;
-    loadData();
+    loadData({ force: true });
   }, [refreshTrigger, loadData]);
 
   useEffect(() => {
     if (Platform.OS !== 'web') return undefined;
-    let startY = 0;
-    let triggered = false;
+    const supportsPointer = typeof window.PointerEvent === 'function';
 
-    const triggerRefresh = () => {
-      if (refreshing || triggered) return;
-      triggered = true;
-      loadData();
+    let startY = 0;
+    let pulling = false;
+    let ready = false;
+
+    const resetPull = () => {
+      startY = 0;
+      pulling = false;
+      ready = false;
+    };
+
+    const beginPull = (position) => {
+      if (window.scrollY > 0 || refreshing) return;
+      pulling = true;
+      ready = false;
+      startY = position ?? 0;
+    };
+
+    const updatePull = (position) => {
+      if (!pulling) return;
+      if (window.scrollY > 0 || refreshing) {
+        resetPull();
+        return;
+      }
+      const distance = (position ?? 0) - startY;
+      ready = distance > 90;
+    };
+
+    const endPull = () => {
+      if (!pulling) return;
+      if (ready && !refreshing) {
+        loadData();
+      }
+      resetPull();
+    };
+
+    const handlePointerDown = (event) => {
+      if (event.pointerType === 'mouse' && event.buttons !== 1) return;
+      beginPull(event.clientY);
+    };
+    const handlePointerMove = (event) => {
+      updatePull(event.clientY);
+    };
+    const handlePointerUp = () => {
+      endPull();
+    };
+    const handlePointerCancel = () => {
+      resetPull();
     };
 
     const handleTouchStart = (event) => {
-      if (window.scrollY > 0 || refreshing) return;
-      startY = event.touches?.[0]?.clientY ?? 0;
-      triggered = false;
+      beginPull(event.touches?.[0]?.clientY);
     };
-
     const handleTouchMove = (event) => {
-      if (window.scrollY > 0 || refreshing || triggered) return;
-      const currentY = event.touches?.[0]?.clientY ?? 0;
-      if (currentY - startY > 80) {
-        triggerRefresh();
-      }
+      updatePull(event.touches?.[0]?.clientY);
+    };
+    const handleTouchEnd = () => {
+      endPull();
+    };
+    const handleTouchCancel = () => {
+      resetPull();
     };
 
-    const handleWheel = (event) => {
-      if (window.scrollY > 0 || refreshing) return;
-      if (event.deltaY < -60) {
-        triggerRefresh();
-      }
-    };
+    if (supportsPointer) {
+      window.addEventListener('pointerdown', handlePointerDown, { passive: true });
+      window.addEventListener('pointermove', handlePointerMove, { passive: true });
+      window.addEventListener('pointerup', handlePointerUp, { passive: true });
+      window.addEventListener('pointercancel', handlePointerCancel, { passive: true });
+      return () => {
+        window.removeEventListener('pointerdown', handlePointerDown);
+        window.removeEventListener('pointermove', handlePointerMove);
+        window.removeEventListener('pointerup', handlePointerUp);
+        window.removeEventListener('pointercancel', handlePointerCancel);
+      };
+    }
 
     window.addEventListener('touchstart', handleTouchStart, { passive: true });
     window.addEventListener('touchmove', handleTouchMove, { passive: true });
-    window.addEventListener('wheel', handleWheel, { passive: true });
+    window.addEventListener('touchend', handleTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', handleTouchCancel, { passive: true });
 
     return () => {
       window.removeEventListener('touchstart', handleTouchStart);
       window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('wheel', handleWheel);
+      window.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('touchcancel', handleTouchCancel);
     };
   }, [refreshing, loadData]);
+
+  const handleRefresh = useCallback(() => {
+    loadData();
+  }, [loadData]);
 
   useEffect(() => {
     const channel = supabase
@@ -544,6 +612,25 @@ export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }
         <Text style={styles.postCount}>{posts.length} posts</Text>
       </View>
       
+      {showRsvpButton && (
+        <TouchableOpacity
+          style={styles.manageCard}
+          onPress={onManageRsvps}
+          activeOpacity={0.85}
+        >
+          <View style={styles.manageIcon}>
+            <Text style={styles.manageIconText}>RSVP</Text>
+          </View>
+          <View style={styles.manageCopy}>
+            <Text style={styles.manageTitle}>Manage RSVPs</Text>
+            <Text style={styles.manageSubtitle}>
+              Keep an eye on RSVP responses and party sizes.
+            </Text>
+          </View>
+          <Text style={styles.manageArrow}>›</Text>
+        </TouchableOpacity>
+      )}
+
       <StoryBar
         storyGroups={storyGroups}
         onAddStory={() => onOpenComposer?.('story')}
@@ -597,7 +684,7 @@ export default function FeedScreen({ guest, onOpenComposer, refreshTrigger = 0 }
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={loadData}
+            onRefresh={handleRefresh}
             tintColor={theme.accent}
           />
         }
@@ -814,6 +901,50 @@ const styles = StyleSheet.create({
   postCount: {
     fontSize: 12,
     color: theme.textMuted
+  },
+  manageCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: theme.card,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: spacing.md,
+    marginBottom: spacing.sm
+  },
+  manageIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: radius.full,
+    backgroundColor: theme.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.md
+  },
+  manageIconText: {
+    color: theme.background,
+    fontWeight: '700',
+    fontSize: 12,
+    letterSpacing: 0.8
+  },
+  manageCopy: {
+    flex: 1
+  },
+  manageTitle: {
+    color: theme.textPrimary,
+    fontSize: 16,
+    fontWeight: '700'
+  },
+  manageSubtitle: {
+    color: theme.textSecondary,
+    fontSize: 13,
+    marginTop: 2
+  },
+  manageArrow: {
+    color: theme.accent,
+    fontSize: 28,
+    fontWeight: '300',
+    marginLeft: spacing.sm
   },
   emptyState: {
     alignItems: 'center',

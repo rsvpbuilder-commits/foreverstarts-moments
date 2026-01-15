@@ -20,6 +20,7 @@ import FeedScreen from './src/screens/FeedScreen';
 import WishesScreen from './src/screens/WishesScreen';
 import StoriesScreen from './src/screens/StoriesScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
+import RsvpManagerScreen from './src/screens/RsvpManagerScreen';
 
 // Components
 import { BottomTabBar } from './src/components/BottomTabBar';
@@ -33,6 +34,8 @@ function MainApp({ guest, onSignOut }) {
     isWeb && window.history.state?.tab ? window.history.state.tab : 'feed'
   );
   const [activeTab, setActiveTab] = useState(initialTabRef.current);
+  const [rsvpManagerVisible, setRsvpManagerVisible] = useState(false);
+  const isCouple = ['bride', 'groom'].includes(guest?.role);
   const [composerVisible, setComposerVisible] = useState(false);
   const [composerType, setComposerType] = useState('post');
   const [uploadToast, setUploadToast] = useState({
@@ -44,6 +47,14 @@ function MainApp({ guest, onSignOut }) {
     message: ''
   });
   const [feedRefreshToken, setFeedRefreshToken] = useState(0);
+  const handleCloseRsvpManager = useCallback(() => {
+    setRsvpManagerVisible(false);
+  }, []);
+  const handleOpenRsvpManager = useCallback(() => {
+    if (isCouple) {
+      setRsvpManagerVisible(true);
+    }
+  }, [isCouple]);
   const changeTab = useCallback(
     (nextTab, options = {}) => {
       setActiveTab((prev) => {
@@ -98,11 +109,16 @@ function MainApp({ guest, onSignOut }) {
   }, []);
 
   useWebBackEntry(composerVisible, handleCloseComposer, 'composer');
+  useWebBackEntry(rsvpManagerVisible, handleCloseRsvpManager, 'rsvp-manager');
 
   useEffect(() => {
     if (Platform.OS !== 'android') return undefined;
 
     const handleHardwareBack = () => {
+      if (rsvpManagerVisible) {
+        handleCloseRsvpManager();
+        return true;
+      }
       if (composerVisible) {
         handleCloseComposer();
         return true;
@@ -119,7 +135,14 @@ function MainApp({ guest, onSignOut }) {
       handleHardwareBack
     );
     return () => subscription.remove();
-  }, [activeTab, changeTab, composerVisible, handleCloseComposer]);
+  }, [
+    activeTab,
+    changeTab,
+    composerVisible,
+    handleCloseComposer,
+    handleCloseRsvpManager,
+    rsvpManagerVisible
+  ]);
 
   const handleUploadStatusChange = useCallback((payload) => {
     if (!payload) return;
@@ -180,6 +203,14 @@ function MainApp({ guest, onSignOut }) {
   }, []);
 
   const renderScreen = () => {
+    if (rsvpManagerVisible) {
+      return (
+        <RsvpManagerScreen
+          guest={guest}
+          onClose={handleCloseRsvpManager}
+        />
+      );
+    }
     switch (activeTab) {
       case 'feed':
         return (
@@ -187,6 +218,8 @@ function MainApp({ guest, onSignOut }) {
             guest={guest} 
             onOpenComposer={handleOpenComposer}
             refreshTrigger={feedRefreshToken}
+            canManageRsvps={isCouple}
+            onManageRsvps={handleOpenRsvpManager}
           />
         );
       case 'wishes':
@@ -206,6 +239,8 @@ function MainApp({ guest, onSignOut }) {
             guest={guest} 
             onOpenComposer={handleOpenComposer}
             refreshTrigger={feedRefreshToken}
+            canManageRsvps={isCouple}
+            onManageRsvps={handleOpenRsvpManager}
           />
         );
     }
@@ -222,11 +257,13 @@ function MainApp({ guest, onSignOut }) {
         {renderScreen()}
       </SafeAreaView>
       
-      <BottomTabBar 
-        activeTab={activeTab} 
-        onTabPress={handleTabPress}
-        guest={guest}
-      />
+      {!rsvpManagerVisible && (
+        <BottomTabBar 
+          activeTab={activeTab} 
+          onTabPress={handleTabPress}
+          guest={guest}
+        />
+      )}
 
       <ComposerModal
         visible={composerVisible}

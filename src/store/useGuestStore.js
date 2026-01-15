@@ -1,6 +1,6 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { safeAsyncStorage } from '../lib/safeAsyncStorage';
 
 export const useGuestStore = create(
   persist(
@@ -11,7 +11,7 @@ export const useGuestStore = create(
     }),
     {
       name: 'wedding-guest-profile',
-      storage: createJSONStorage(() => AsyncStorage)
+      storage: createJSONStorage(() => safeAsyncStorage)
     }
   )
 );
