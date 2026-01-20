@@ -39,14 +39,14 @@ function InlineVideoPreview({
   });
 
   return (
-    <VideoView
-      style={style}
-      player={player}
-      nativeControls={showControls}
-      allowsFullscreen={showControls}
-      contentFit="cover"
-      pointerEvents={pointerEvents}
-    />
+      <VideoView
+        style={style}
+        player={player}
+        nativeControls={showControls}
+        fullscreenOptions={{ enabled: showControls }}
+        contentFit="cover"
+        pointerEvents={pointerEvents}
+      />
   );
 }
 
@@ -253,11 +253,13 @@ export function ComposerModal({
           current: index + 1,
           type
         });
+        const resolvedMimeType =
+          media.mimeType || (isVideoAsset(media) ? 'video/mp4' : 'image/jpeg');
         const mediaUrl = await uploadMediaAsync({
           uri: media.uri,
           folder: type === 'story' ? 'stories' : 'posts',
           guestId: guest.id,
-          mimeType: media.mimeType
+          mimeType: resolvedMimeType
         });
         const record = {
           media_url: mediaUrl,

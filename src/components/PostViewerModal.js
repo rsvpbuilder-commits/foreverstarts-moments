@@ -62,7 +62,7 @@ function ViewerVideo({ uri }) {
     <VideoView
       style={styles.viewerVideo}
       player={player}
-      allowsFullscreen
+      fullscreenOptions={{ enabled: true }}
       allowsPictureInPicture
       contentFit="contain"
     />

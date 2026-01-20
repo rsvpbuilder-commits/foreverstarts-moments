@@ -1,8 +1,7 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
-import * as FileSystem from 'expo-file-system/legacy';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { supabase } from './supabase';
+import { supabase, SUPABASE_URL } from './supabase';
 
 const extraConfig =
   Constants?.expoConfig?.extra ||
@@ -10,38 +9,75 @@ const extraConfig =
   Constants?.manifest?.extra ||
   {};
 
-const UPLOAD_ENDPOINT =
-  extraConfig.uploadEndpoint || process.env.EXPO_PUBLIC_UPLOAD_ENDPOINT || '';
+const STORAGE_BUCKET =
+  extraConfig.storageBucket || process.env.EXPO_PUBLIC_STORAGE_BUCKET || '';
 
-const MEDIA_FIELD = 'file';
+const CACHE_CONTROL =
+  extraConfig.uploadCacheControl ||
+  process.env.EXPO_PUBLIC_UPLOAD_CACHE_CONTROL ||
+  '3600';
 
-if (!UPLOAD_ENDPOINT) {
+if (!STORAGE_BUCKET) {
   console.warn(
-    'Upload endpoint missing. Set extra.uploadEndpoint or EXPO_PUBLIC_UPLOAD_ENDPOINT.'
+    'Storage bucket missing. Set extra.storageBucket or EXPO_PUBLIC_STORAGE_BUCKET.'
   );
 }
 
 const isImageMime = (mime) => (mime || '').startsWith('image/');
 
+const MIME_EXTENSION_MAP = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/gif': 'gif',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+  'video/mpeg': 'mpeg',
+  'video/3gpp': '3gp',
+  'video/3gpp2': '3g2',
+  'video/webm': 'webm',
+  'video/x-matroska': 'mkv'
+};
+
+const getExtensionFromMime = (mimeType = '') => {
+  const normalized = mimeType.toLowerCase();
+  if (!normalized || normalized === 'application/octet-stream') {
+    return '';
+  }
+  return MIME_EXTENSION_MAP[normalized] || normalized.split('/').pop() || '';
+};
+
 const buildFileName = (uri = '', mimeType = 'application/octet-stream') => {
   const fallbackName = `upload-${Date.now()}`;
-  const uriName = uri.split('/').pop();
-  if (uriName) return uriName;
-  const extension = mimeType.split('/').pop();
+  const uriName = uri.split('?')[0].split('/').pop();
+  if (uriName && uriName.includes('.')) return uriName;
+  const extension = getExtensionFromMime(mimeType);
   return extension ? `${fallbackName}.${extension}` : fallbackName;
 };
 
-const getAuthHeaders = async () => {
-  const {
-    data: { session }
-  } = await supabase.auth.getSession();
-  if (session?.access_token) {
-    return {
-      Authorization: `Bearer ${session.access_token}`
-    };
-  }
-  return {};
+const sanitizePathSegment = (value = '') =>
+  value
+    .toString()
+    .trim()
+    .replace(/^[\\/]+|[\\/]+$/g, '')
+    .replace(/[^0-9a-zA-Z/_-]/g, '-');
+
+const buildStoragePath = ({ folder, guestId, fileName }) => {
+  const safeFolder = sanitizePathSegment(folder || 'misc');
+  const safeGuest = sanitizePathSegment(guestId || 'guest');
+  const prefix = [safeFolder, safeGuest].filter(Boolean).join('/');
+  return [prefix, `${Date.now()}-${fileName}`].filter(Boolean).join('/');
 };
+
+const PUBLIC_OBJECT_PREFIX = SUPABASE_URL
+  ? `${SUPABASE_URL}/storage/v1/object/public/`
+  : '';
+const PUBLIC_RENDER_PREFIX = SUPABASE_URL
+  ? `${SUPABASE_URL}/storage/v1/render/image/public/`
+  : '';
 
 const compressImageAsync = async (uri, mimeType) => {
   if (Platform.OS === 'web' || !isImageMime(mimeType)) {
@@ -67,82 +103,41 @@ const compressImageAsync = async (uri, mimeType) => {
   }
 };
 
-const uploadNativeAsync = async ({
-  uri,
-  mimeType,
-  fileName,
-  folder,
-  guestId
-}) => {
-  const headers = {
-    Accept: 'application/json',
-    ...(await getAuthHeaders())
-  };
-
-  const result = await FileSystem.uploadAsync(UPLOAD_ENDPOINT, uri, {
-    httpMethod: 'POST',
-    headers,
-    fieldName: MEDIA_FIELD,
-    mimeType,
-    uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-    parameters: {
-      fileName,
-      folder: folder || 'misc',
-      guestId: guestId || 'guest',
-      mediaType: isImageMime(mimeType) ? 'image' : 'video'
-    }
-  });
-
-  if (result.status >= 400) {
-    throw new Error(
-      `Upload failed with status ${result.status}: ${result.body || ''}`
-    );
-  }
-
-  try {
-    const parsed = JSON.parse(result.body);
-    return parsed?.url || parsed?.publicUrl || '';
-  } catch (err) {
-    throw new Error('Upload succeeded but response was invalid JSON.');
-  }
-};
-
-const uploadWebAsync = async ({
-  uri,
-  mimeType,
-  fileName,
-  folder,
-  guestId
-}) => {
+const readWebBlobAsync = async (uri) => {
   const response = await fetch(uri);
   if (!response.ok) {
     throw new Error('Unable to read file for upload.');
   }
-  const blob = await response.blob();
+  return response.blob();
+};
 
+const buildNativeFormData = ({ uri, fileName, mimeType }) => {
   const form = new FormData();
-  form.append(MEDIA_FIELD, blob, fileName);
-  form.append('folder', folder || 'misc');
-  form.append('guestId', guestId || 'guest');
-  form.append('mediaType', isImageMime(mimeType) ? 'image' : 'video');
-
-  const headers = await getAuthHeaders();
-
-  const uploadResponse = await fetch(UPLOAD_ENDPOINT, {
-    method: 'POST',
-    headers,
-    body: form
+  form.append('', {
+    uri,
+    name: fileName,
+    type: mimeType
   });
+  return form;
+};
 
-  if (!uploadResponse.ok) {
-    const errorText = await uploadResponse.text();
-    throw new Error(
-      `Upload failed with status ${uploadResponse.status}: ${errorText}`
-    );
+const createUploadTargetAsync = async (path) => {
+  const { data, error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .createSignedUploadUrl(path, { upsert: true });
+
+  if (error) {
+    throw new Error(`Unable to create upload target: ${error.message}`);
   }
 
-  const data = await uploadResponse.json();
-  return data?.url || data?.publicUrl || '';
+  return data;
+};
+
+const getPublicUrlAsync = async (path) => {
+  const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path, {
+    download: false
+  });
+  return data?.publicUrl || '';
 };
 
 export async function uploadMediaAsync({
@@ -152,8 +147,8 @@ export async function uploadMediaAsync({
   mimeType = 'application/octet-stream'
 }) {
   if (!uri) throw new Error('Missing file URI');
-  if (!UPLOAD_ENDPOINT) {
-    throw new Error('Upload endpoint not configured.');
+  if (!STORAGE_BUCKET) {
+    throw new Error('Storage bucket not configured.');
   }
 
   const fileName = buildFileName(uri, mimeType);
@@ -161,22 +156,52 @@ export async function uploadMediaAsync({
     uri,
     mimeType
   );
+  const storagePath = buildStoragePath({ folder, guestId, fileName });
+  const { token, path } = await createUploadTargetAsync(storagePath);
+  const fileBody =
+    Platform.OS === 'web'
+      ? await readWebBlobAsync(processedUri)
+      : buildNativeFormData({
+          uri: processedUri,
+          fileName,
+          mimeType: processedMime
+        });
 
-  if (Platform.OS === 'web') {
-    return uploadWebAsync({
-      uri: processedUri,
-      mimeType: processedMime,
-      fileName,
-      folder,
-      guestId
+  const { error: uploadError } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .uploadToSignedUrl(path, token, fileBody, {
+      upsert: true,
+      contentType: processedMime,
+      cacheControl: CACHE_CONTROL
     });
+
+  if (uploadError) {
+    throw new Error(`Upload failed: ${uploadError.message}`);
   }
 
-  return uploadNativeAsync({
-    uri: processedUri,
-    mimeType: processedMime,
-    fileName,
-    folder,
-    guestId
-  });
+  return getPublicUrlAsync(path);
+}
+
+export const STORAGE_BUCKET_NAME = STORAGE_BUCKET;
+
+export function getStoragePathFromUrl(url = '') {
+  if (!url || typeof url !== 'string') return null;
+  const base = decodeURIComponent(url.split('?')[0]);
+  let remainder = null;
+
+  if (PUBLIC_OBJECT_PREFIX && base.startsWith(PUBLIC_OBJECT_PREFIX)) {
+    remainder = base.slice(PUBLIC_OBJECT_PREFIX.length);
+  } else if (PUBLIC_RENDER_PREFIX && base.startsWith(PUBLIC_RENDER_PREFIX)) {
+    remainder = base.slice(PUBLIC_RENDER_PREFIX.length);
+  } else {
+    return null;
+  }
+
+  if (!remainder) return null;
+  const parts = remainder.split('/');
+  if (parts.length < 2) return null;
+  if (parts[0] === STORAGE_BUCKET && parts.length >= 2) {
+    return parts.slice(1).join('/');
+  }
+  return parts.slice(1).join('/');
 }

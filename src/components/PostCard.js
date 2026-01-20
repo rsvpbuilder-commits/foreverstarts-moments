@@ -66,16 +66,16 @@ function ReactionButton({ reactions, currentGuestId, onPress }) {
 }
 
 function VideoPlayer({ uri }) {
-  const player = useVideoPlayer(uri, (player) => {
-    player.loop = false;
-    player.muted = true;
+  const player = useVideoPlayer(uri, (playerInstance) => {
+    playerInstance.loop = false;
+    playerInstance.muted = true;
   });
 
   return (
     <VideoView
       style={styles.video}
       player={player}
-      allowsFullscreen
+      fullscreenOptions={{ enabled: true }}
       allowsPictureInPicture
       contentFit="cover"
     />

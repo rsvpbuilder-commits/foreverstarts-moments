@@ -14,6 +14,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../lib/supabase';
+import {
+  STORAGE_BUCKET_NAME,
+  getStoragePathFromUrl
+} from '../lib/storage';
 import { theme, spacing, radius } from '../theme/colors';
 import { StoryBar } from '../components/StoryBar';
 import { PostCard } from '../components/PostCard';
@@ -114,6 +118,31 @@ export default function FeedScreen({
     () => setEditState({ visible: false, post: null }),
     []
   );
+  const deletePostMediaFiles = useCallback(async (postRecord) => {
+    if (!postRecord || !STORAGE_BUCKET_NAME) return;
+    const pathSet = new Set();
+    const appendFromUrl = (url) => {
+      const path = getStoragePathFromUrl(url);
+      if (path) {
+        pathSet.add(path);
+      }
+    };
+    appendFromUrl(postRecord.media_url);
+    if (Array.isArray(postRecord.media_gallery)) {
+      postRecord.media_gallery.forEach((item) => appendFromUrl(item?.media_url));
+    }
+    if (pathSet.size === 0) return;
+    try {
+      const { error } = await supabase.storage
+        .from(STORAGE_BUCKET_NAME)
+        .remove(Array.from(pathSet));
+      if (error) {
+        console.warn('Failed to delete media files', error);
+      }
+    } catch (err) {
+      console.warn('Unexpected error deleting media files', err);
+    }
+  }, []);
   const openPostViewer = useCallback((post, index = 0) => {
     if (!post) return;
     setPostViewer({ visible: true, post, index });
@@ -586,6 +615,7 @@ export default function FeedScreen({
       setPosts((prev) =>
         prev.filter((item) => item.id !== deleteConfirm.post.id)
       );
+      await deletePostMediaFiles(deleteConfirm.post);
       closeDeleteConfirm();
       closePostActions();
     } catch (err) {
@@ -596,7 +626,12 @@ export default function FeedScreen({
         error: 'Unable to delete this post. Please try again.'
       }));
     }
-  }, [deleteConfirm.post, closeDeleteConfirm, closePostActions]);
+  }, [
+    deleteConfirm.post,
+    closeDeleteConfirm,
+    closePostActions,
+    deletePostMediaFiles
+  ]);
 
   const FeedHeader = () => (
     <View style={styles.header}>

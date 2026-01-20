@@ -48,7 +48,9 @@ module.exports = {
     extra: {
       supabaseUrl: process.env.EXPO_PUBLIC_SUPABASE_URL || '',
       supabaseAnonKey: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '',
-      uploadEndpoint: process.env.EXPO_PUBLIC_UPLOAD_ENDPOINT || '',
+      storageBucket: process.env.EXPO_PUBLIC_STORAGE_BUCKET || '',
+      uploadCacheControl:
+        process.env.EXPO_PUBLIC_UPLOAD_CACHE_CONTROL || '3600',
       allowCoupleProvisioning: parseBoolean(
         process.env.EXPO_PUBLIC_ALLOW_COUPLE_PROVISIONING,
         false

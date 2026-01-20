@@ -86,10 +86,6 @@ export function EditPostModal({ visible, post, guest, onClose, onUpdated }) {
 
   const handleSave = async () => {
     if (!post) return;
-    if (!caption.trim()) {
-      setError('Caption cannot be empty.');
-      return;
-    }
     const wantsFeaturedMoment = isCouple && isFeaturedMoment;
     let customCreatedAt = null;
     if (momentDate.trim()) {
@@ -111,8 +107,9 @@ export function EditPostModal({ visible, post, guest, onClose, onUpdated }) {
       }
     }
 
+    const sanitizedCaption = caption.trim();
     const payload = {
-      caption: caption.trim(),
+      caption: sanitizedCaption,
       is_featured: wantsFeaturedMoment,
       moment_title: wantsFeaturedMoment ? momentTitle.trim() : null,
       moment_subtitle: wantsFeaturedMoment ? momentSubtitle.trim() : null,

@@ -79,7 +79,7 @@ function StoryVideoPlayer({ uri, isActive }) {
       style={styles.video}
       player={player}
       contentFit="cover"
-      allowsFullscreen
+      fullscreenOptions={{ enabled: true }}
       allowsPictureInPicture={false}
     />
   );

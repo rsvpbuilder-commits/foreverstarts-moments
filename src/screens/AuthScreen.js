@@ -140,7 +140,7 @@ export default function AuthScreen() {
           uri: avatar.uri,
           folder: 'avatars',
           guestId: user.id,
-          mimeType: avatar.mimeType
+          mimeType: avatar.mimeType || 'image/jpeg'
         });
       }
       const selectedRole = coupleProvisioningEnabled ? form.role : 'guest';
