@@ -7,9 +7,12 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  RefreshControl
+  RefreshControl,
+  Alert,
+  Platform
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import * as FileSystem from 'expo-file-system';
 import { supabase } from '../lib/supabase';
 import { theme, spacing, radius } from '../theme/colors';
 
@@ -64,6 +67,7 @@ export default function RsvpManagerScreen({ guest, onClose }) {
   const [guestNamesEditor, setGuestNamesEditor] = useState({ id: null, value: '' });
   const [guestNamesLoading, setGuestNamesLoading] = useState({});
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [exporting, setExporting] = useState(false);
   const handleClose = useCallback(() => {
     if (typeof onClose === 'function') {
       onClose();
@@ -218,6 +222,231 @@ export default function RsvpManagerScreen({ guest, onClose }) {
   }, [guestNamesEditor, isCouple]);
 
   const handleRefresh = () => fetchRsvps(true);
+  const handleExportGuestList = useCallback(async () => {
+    const attending = rsvps.filter(
+      (entry) => normalizeStatus(entry?.status ?? entry?.rsvp_status) === 'yes'
+    );
+    if (!attending.length) {
+      Alert.alert('No attendees yet', 'No attending RSVPs to export. Once guests say yes, you can download the list here.');
+      return;
+    }
+
+    // Smart parsing that handles names with commas (e.g., "Last, First")
+    // Uses party size to determine how to split
+    const parseGuestNames = (rawValue, partySize) => {
+      if (!rawValue) return [];
+      const raw = rawValue.toString().trim();
+      if (!raw) return [];
+
+      // First try splitting by comma
+      const commaSplit = raw.split(',').map((n) => n.trim()).filter(Boolean);
+      
+      // If comma split gives us exactly the party size or less, use it
+      if (commaSplit.length <= partySize) {
+        return commaSplit;
+      }
+
+      // If we have more items than party size, names likely contain commas
+      // Try to intelligently merge them back
+      // Look for patterns like "Lastname, Firstname" and merge them
+      const merged = [];
+      let i = 0;
+      while (i < commaSplit.length && merged.length < partySize) {
+        const current = commaSplit[i];
+        const next = commaSplit[i + 1];
+        
+        // Check if this looks like "Lastname" followed by "Firstname"
+        // (current is short, next exists and doesn't look like a full name)
+        const currentLooksLikeLastName = current && !current.includes(' ') && current.length < 20;
+        const nextLooksLikeFirstName = next && !next.includes(' ') && next.length < 20;
+        
+        if (currentLooksLikeLastName && nextLooksLikeFirstName && merged.length < partySize - 1) {
+          // Merge as "Lastname, Firstname"
+          merged.push(`${current}, ${next}`);
+          i += 2;
+        } else {
+          merged.push(current);
+          i += 1;
+        }
+      }
+
+      // If merging still gives too many, just take first N based on party size
+      return merged.slice(0, partySize);
+    };
+
+    const formatDate = (dateStr) => {
+      if (!dateStr) return '';
+      try {
+        const date = new Date(dateStr);
+        return date.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      } catch {
+        return dateStr;
+      }
+    };
+
+    // Normalize name for comparison (lowercase, trim extra spaces)
+    const normalizeName = (name) => (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+    // Create comprehensive CSV with all guest details
+    const csvRows = [
+      [
+        '#',
+        'Guest Name',
+        'RSVP Submitted By',
+        'Party Size',
+        'Message/Notes',
+        'RSVP Date'
+      ]
+    ];
+    
+    let rowNumber = 1;
+    let totalGuests = 0;
+
+    attending.forEach((entry) => {
+      const partySize = getPartySize(entry);
+      const primaryName = entry?.name?.trim() || 'Unnamed Response';
+      const guestNames = parseGuestNames(entry?.guest_names, partySize);
+      const message = (entry?.message || entry?.rsvp_notes || entry?.notes || '').replace(/[\n\r]+/g, ' ').trim();
+      const rsvpDate = formatDate(entry?.created_at);
+
+      // Build unique list of guests for this RSVP
+      const allNames = new Set();
+      const uniqueGuests = [];
+      const primaryNormalized = normalizeName(primaryName);
+
+      // Check if primary name is already in guest_names
+      const guestNamesNormalized = guestNames.map(normalizeName);
+      const primaryInGuestNames = guestNamesNormalized.some(
+        (n) => n === primaryNormalized || n.includes(primaryNormalized) || primaryNormalized.includes(n)
+      );
+
+      if (primaryInGuestNames && guestNames.length > 0) {
+        // guest_names already contains primary - use it as the full list
+        guestNames.forEach((name) => {
+          const normalized = normalizeName(name);
+          if (!allNames.has(normalized)) {
+            allNames.add(normalized);
+            uniqueGuests.push(name);
+          }
+        });
+      } else {
+        // Primary is not in guest_names, add primary first
+        allNames.add(primaryNormalized);
+        uniqueGuests.push(primaryName);
+        
+        // Then add other guest names
+        guestNames.forEach((name) => {
+          const normalized = normalizeName(name);
+          if (!allNames.has(normalized)) {
+            allNames.add(normalized);
+            uniqueGuests.push(name);
+          }
+        });
+      }
+
+      // IMPORTANT: Party size is the authoritative count - never exceed it
+      // Trim to party size if we have too many names
+      const trimmedGuests = uniqueGuests.slice(0, partySize);
+
+      // If we still need more guests to match party size, add unnamed placeholders
+      const unnamedCount = Math.max(partySize - trimmedGuests.length, 0);
+      for (let i = 0; i < unnamedCount; i += 1) {
+        trimmedGuests.push(`Guest ${i + 1} of ${primaryName}`);
+      }
+
+      // Total guests = party size (authoritative)
+      totalGuests += partySize;
+
+      // Add each guest as a row (exactly partySize rows)
+      trimmedGuests.forEach((guestName, index) => {
+        csvRows.push([
+          rowNumber.toString(),
+          guestName,
+          primaryName,
+          index === 0 ? partySize.toString() : '', // Only show party size on first row
+          index === 0 ? message : '', // Only show message on first row
+          index === 0 ? rsvpDate : '' // Only show date on first row
+        ]);
+        rowNumber += 1;
+      });
+    });
+
+    // Add summary section at the bottom
+    csvRows.push([]);
+    csvRows.push(['SUMMARY']);
+    csvRows.push(['Total RSVPs', attending.length.toString()]);
+    csvRows.push(['Total Guests', totalGuests.toString()]);
+    csvRows.push(['Export Date', new Date().toLocaleString()]);
+
+    const csvContent = csvRows
+      .map((row) =>
+        row
+          .map((value) => {
+            const normalized = (value ?? '').toString();
+            const escaped = normalized.replace(/"/g, '""');
+            return `"${escaped}"`;
+          })
+          .join(',')
+      )
+      .join('\n');
+
+    try {
+      setExporting(true);
+      const timestamp = new Date();
+      const fileName = `attending-guests-${timestamp.toISOString().slice(0, 10)}.csv`;
+
+      if (Platform.OS === 'web') {
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', fileName);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        Alert.alert('Export complete', `Exported ${totalGuests} guests from ${attending.length} RSVPs as ${fileName}.`);
+      } else if (Platform.OS === 'android' && FileSystem.StorageAccessFramework) {
+        const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permissions.granted) {
+          Alert.alert('Export cancelled', 'Storage permission is required to save the guest list.');
+        } else {
+          const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+            permissions.directoryUri,
+            fileName,
+            'text/csv'
+          );
+          await FileSystem.StorageAccessFramework.writeAsStringAsync(fileUri, csvContent, {
+            encoding: FileSystem.EncodingType.UTF8
+          });
+          Alert.alert('Export complete', 'Guest list saved to the folder you selected.');
+        }
+      } else {
+        const targetUri = `${FileSystem.documentDirectory || FileSystem.cacheDirectory}${fileName}`;
+        await FileSystem.writeAsStringAsync(targetUri, csvContent, {
+          encoding: FileSystem.EncodingType.UTF8
+        });
+        Alert.alert(
+          'Export complete',
+          `Guest list saved to:\n${targetUri}\n\nYou can access it via the Files app.`
+        );
+      }
+    } catch (err) {
+      console.error('Guest list export failed', err);
+      Alert.alert(
+        'Export failed',
+        'Something went wrong while exporting the guest list. Please try again.'
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [rsvps]);
 
   const renderRsvp = ({ item }) => {
     const status = normalizeStatus(item?.status ?? item?.rsvp_status);
@@ -398,6 +627,8 @@ export default function RsvpManagerScreen({ guest, onClose }) {
             lastUpdated={lastUpdated}
             isCouple={isCouple}
             onRefresh={handleRefresh}
+            onExport={handleExportGuestList}
+            exporting={exporting}
             stats={stats}
             searchValue={search}
             onSearchChange={setSearch}
@@ -436,6 +667,8 @@ function RsvpManagerHeader({
   lastUpdated,
   isCouple,
   onRefresh,
+  onExport,
+  exporting,
   stats,
   searchValue,
   onSearchChange,
@@ -474,6 +707,22 @@ function RsvpManagerHeader({
           <Feather name="refresh-ccw" size={16} color={theme.textPrimary} />
           <Text style={styles.refreshText}>Refresh</Text>
         </TouchableOpacity>
+        {isCouple && (
+          <TouchableOpacity
+            style={[styles.exportButton, exporting && styles.buttonDisabled]}
+            onPress={onExport}
+            disabled={exporting}
+          >
+            {exporting ? (
+              <ActivityIndicator size="small" color={theme.background} />
+            ) : (
+              <Feather name="download" size={16} color={theme.background} />
+            )}
+            <Text style={styles.exportText}>
+              Export Guests
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
       <View style={styles.statsGrid}>
         <View style={styles.statCard}>
@@ -619,7 +868,9 @@ const styles = StyleSheet.create({
   actionsRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    marginBottom: spacing.sm
+    marginBottom: spacing.sm,
+    gap: spacing.sm,
+    flexWrap: 'wrap'
   },
   refreshButton: {
     flexDirection: 'row',
@@ -633,6 +884,20 @@ const styles = StyleSheet.create({
   },
   refreshText: {
     color: theme.textPrimary,
+    fontWeight: '600',
+    fontSize: 14
+  },
+  exportButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.full,
+    backgroundColor: theme.accent
+  },
+  exportText: {
+    color: theme.background,
     fontWeight: '600',
     fontSize: 14
   },
